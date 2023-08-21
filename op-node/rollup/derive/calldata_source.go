@@ -1,11 +1,14 @@
 package derive
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -101,6 +104,30 @@ func (ds *DataSource) Next(ctx context.Context) (eth.Data, error) {
 	}
 }
 
+// DecodeETHDataPointer returns the height and index of the data pointer from
+// serialized bytes.
+func DecodeETHDataPointer(data []byte, log log.Logger) (*chainhash.Hash, uint32) {
+	log.Warn("decoding data pointer: %x", "data", data)
+	buf := bytes.NewBuffer(data)
+	var hash [32]byte
+	err := binary.Read(buf, binary.BigEndian, &hash)
+	if err != nil {
+		log.Error("reading block hash failed")
+	}
+	log.Warn("decoded hash: %x", "hash", hash)
+	var index uint32
+	err = binary.Read(buf, binary.BigEndian, &index)
+	if err != nil {
+		log.Error("reading tx index failed")
+	}
+	log.Warn("decoded index: %d", "index", index)
+	newHash, err := chainhash.NewHash(hash[:])
+	if err != nil {
+		log.Error("decoding hash failed")
+	}
+	return newHash, index
+}
+
 // DataFromEVMTransactions filters all of the transactions and returns the calldata from transactions
 // that are sent to the batch inbox address from the batch sender address.
 // This will return an empty array if no valid transactions are found.
@@ -119,7 +146,17 @@ func DataFromEVMTransactions(config *rollup.Config, batcherAddr common.Address, 
 				log.Warn("tx in inbox with unauthorized submitter", "index", j, "err", err)
 				continue // not an authorized batch submitter, ignore
 			}
-			out = append(out, tx.Data())
+
+			data := tx.Data()
+			hash, index := DecodeETHDataPointer(data, log)
+			log.Warn("decoded eth data pointer", "hash", hash, "index", index)
+
+			data, err = http.Get(fmt.Sprintf("http://127.0.0.0/getTransaction?hash=", hash))
+			log.Warn("read tx data", "data", data)
+			if err != nil {
+				log.Warn("error reading data", "err", err)
+			}
+			out = append(out, eth.Data(data))
 		}
 	}
 	return out
